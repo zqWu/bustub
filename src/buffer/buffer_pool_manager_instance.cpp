@@ -12,6 +12,7 @@
 
 #include "buffer/buffer_pool_manager_instance.h"
 
+#include "buffer/clock_replacer.h"
 #include "common/macros.h"
 
 namespace bustub {
@@ -34,7 +35,8 @@ BufferPoolManagerInstance::BufferPoolManagerInstance(size_t pool_size, uint32_t 
       "BPI index cannot be greater than the number of BPIs in the pool. In non-parallel case, index should just be 1.");
   // We allocate a consecutive memory space for the buffer pool.
   pages_ = new Page[pool_size_];
-  replacer_ = new LRUReplacer(pool_size);
+  // replacer_ = new LRUReplacer(pool_size);
+  replacer_ = new ClockReplacer(pool_size);
 
   // Initially, every page is in the free list.
   for (size_t i = 0; i < pool_size_; ++i) {
@@ -49,11 +51,35 @@ BufferPoolManagerInstance::~BufferPoolManagerInstance() {
 
 auto BufferPoolManagerInstance::FlushPgImp(page_id_t page_id) -> bool {
   // Make sure you call DiskManager::WritePage!
+  if (page_id == INVALID_PAGE_ID) {
+    return false;
+  }
+
+  frame_id_t frame_id;
+  auto it = page_table_.find(page_id);
+  if (it != page_table_.end()) {
+    // found in page_table
+    frame_id = it->second;
+    Page *page = pages_ + frame_id;
+    if (page->IsDirty()) {
+      disk_manager_->WritePage(page_id, reinterpret_cast<char *>(page));
+      page->is_dirty_ = false;
+    }
+  }
+
   return false;
 }
 
 void BufferPoolManagerInstance::FlushAllPgsImp() {
   // You can do it!
+  Page *page;
+  for (auto &iter : page_table_) {
+    page = pages_ + iter.second;
+    if (page->IsDirty()) {
+      disk_manager_->WritePage(iter.first, reinterpret_cast<char *>(page));
+      page->is_dirty_ = false;
+    }
+  }
 }
 
 auto BufferPoolManagerInstance::NewPgImp(page_id_t *page_id) -> Page * {
@@ -62,7 +88,41 @@ auto BufferPoolManagerInstance::NewPgImp(page_id_t *page_id) -> Page * {
   // 2.   Pick a victim page P from either the free list or the replacer. Always pick from the free list first.
   // 3.   Update P's metadata, zero out memory and add P to the page table.
   // 4.   Set the page ID output parameter. Return a pointer to P.
-  return nullptr;
+
+  *page_id = AllocatePage();
+  //  AllocatePage();
+  frame_id_t frame_id;
+  Page *page = nullptr;
+
+  // 2
+  if (!free_list_.empty()) {  // have empty frame
+    frame_id = free_list_.front();
+    free_list_.pop_front();
+    page = pages_ + frame_id;
+
+    // page->page_id_ = INVALID_PAGE_ID;
+    std::pair<page_id_t, frame_id_t> pair(*page_id, frame_id);
+    page_table_.insert(page_table_.begin(), pair);
+  } else {
+    // frame full, need victim
+    bool is_found = replacer_->Victim(&frame_id);
+    if (is_found) {  // found a page
+      page = pages_ + frame_id;
+      if (page->IsDirty()) {
+        // page->WLatch();
+        disk_manager_->WritePage(*page_id, reinterpret_cast<char *>(page));
+        // page->WUnlatch();
+      }
+    }
+  }
+
+  if (page != nullptr) {
+    // disk_manager_->ReadPage(*page_id, reinterpret_cast<char *>(page));
+    page->pin_count_ = 1;
+    replacer_->Pin(frame_id);
+  }
+
+  return page;
 }
 
 auto BufferPoolManagerInstance::FetchPgImp(page_id_t page_id) -> Page * {
@@ -73,6 +133,47 @@ auto BufferPoolManagerInstance::FetchPgImp(page_id_t page_id) -> Page * {
   // 2.     If R is dirty, write it back to the disk.
   // 3.     Delete R from the page table and insert P.
   // 4.     Update P's metadata, read in the page content from disk, and then return a pointer to P.
+
+  frame_id_t frame_id;
+
+  auto it = page_table_.find(page_id);
+  if (it != page_table_.end()) {
+    // found in page_table
+    frame_id = it->second;
+    replacer_->Pin(frame_id);
+    return pages_ + frame_id;
+  }
+
+  // not exists in page_table
+  if (!free_list_.empty()) {
+    // have empty frame
+    frame_id = free_list_.front();
+    free_list_.pop_front();
+    // read from disk, and unpin it
+    Page *page = pages_ + frame_id;
+    disk_manager_->ReadPage(page_id, reinterpret_cast<char *>(page));
+    // replacer_->Unpin(frame_id);
+    return pages_ + frame_id;
+  }
+
+  // frame full, need victim
+  bool is_found = replacer_->Victim(&frame_id);
+  if (is_found) {
+    // found a page
+    Page *page = pages_ + frame_id;
+    if (page->IsDirty()) {
+      page->WLatch();
+      disk_manager_->WritePage(page_id, reinterpret_cast<char *>(page));
+      page->WUnlatch();
+    }
+    // read from disk, and unpin it
+    disk_manager_->ReadPage(page_id, reinterpret_cast<char *>(page));
+    // replacer_->Unpin(frame_id);
+    return pages_ + frame_id;
+  }
+
+  // frame full, and no victim -> give up
+
   return nullptr;
 }
 
@@ -82,10 +183,53 @@ auto BufferPoolManagerInstance::DeletePgImp(page_id_t page_id) -> bool {
   // 1.   If P does not exist, return true.
   // 2.   If P exists, but has a non-zero pin-count, return false. Someone is using the page.
   // 3.   Otherwise, P can be deleted. Remove P from the page table, reset its metadata and return it to the free list.
-  return false;
+
+  if (page_id == INVALID_PAGE_ID) {  // not exist
+    return true;
+  }
+
+  frame_id_t frame_id;
+  auto it = page_table_.find(page_id);
+  if (it != page_table_.end()) {  // not exist
+    return true;
+  }
+
+  frame_id = it->second;
+  Page *page = pages_ + frame_id;
+  if (page->pin_count_ > 0) {  // non-zero pin-count
+    return false;
+  }
+
+  // can be deleted, do delete
+  DeallocatePage(page_id);
+  page->page_id_ = INVALID_PAGE_ID;
+  // delete from page_table_
+  page_table_.erase(it);
+  // add to free_list_
+  free_list_.push_back(frame_id);
+
+  return true;
 }
 
-auto BufferPoolManagerInstance::UnpinPgImp(page_id_t page_id, bool is_dirty) -> bool { return false; }
+auto BufferPoolManagerInstance::UnpinPgImp(page_id_t page_id, bool is_dirty) -> bool {
+  auto it = page_table_.find(page_id);
+  if (it == page_table_.end()) {
+    // not found in page_table
+    return true;
+  }
+
+  // found in page_table
+  frame_id_t frame_id = it->second;
+  Page *page = pages_ + frame_id;
+
+  if (page->pin_count_ > 0) {
+    replacer_->Unpin(frame_id);
+    page->pin_count_ = 0;
+    return true;
+  }
+
+  return false;
+}
 
 auto BufferPoolManagerInstance::AllocatePage() -> page_id_t {
   const page_id_t next_page_id = next_page_id_;
