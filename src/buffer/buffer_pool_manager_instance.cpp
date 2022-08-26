@@ -63,8 +63,10 @@ auto BufferPoolManagerInstance::FlushPgImp(page_id_t page_id) -> bool {
     frame_id = it->second;
     Page *page = pages_ + frame_id;
     if (page->IsDirty()) {
+      page->WLatch();
       disk_manager_->WritePage(page_id, reinterpret_cast<char *>(page));
       page->is_dirty_ = false;
+      page->WUnlatch();
     }
   }
 
@@ -121,7 +123,7 @@ auto BufferPoolManagerInstance::NewPgImp(page_id_t *page_id) -> Page * {
       if (it != page_table_.end()) {
         page_table_.erase(it);
       } else {
-        // LOG_DEBUG("error: should found %d in page_table_, actually not found", old_page_id);
+        // LOG_DEBUG("error: should be found %d in page_table_, actually not found", old_page_id);
       }
 
       page = pages_ + frame_id;
@@ -156,6 +158,7 @@ auto BufferPoolManagerInstance::FetchPgImp(page_id_t page_id) -> Page * {
   // 3.     Delete R from the page table and insert P.
   // 4.     Update P's metadata, read in the page content from disk, and then return a pointer to P.
 
+  // LOG_DEBUG("page_id=%d", page_id);
   frame_id_t frame_id;
 
   auto it = page_table_.find(page_id);
@@ -188,6 +191,14 @@ auto BufferPoolManagerInstance::FetchPgImp(page_id_t page_id) -> Page * {
       page->WUnlatch();
     }
 
+    // remove from page_table_
+    auto it2 = page_table_.find(page->page_id_);
+    if (it2 != page_table_.end()) {
+      page_table_.erase(it2);
+    } else {
+      // LOG_DEBUG("error: should be found %d in page_table_, actually not found", page->page_id_);
+    }
+
     page->WLatch();
     // read from disk, and unpin it
     disk_manager_->ReadPage(page_id, reinterpret_cast<char *>(page));
@@ -196,7 +207,7 @@ auto BufferPoolManagerInstance::FetchPgImp(page_id_t page_id) -> Page * {
     page->pin_count_ = 1;
     page->WUnlatch();
 
-    replacer_->Unpin(frame_id);
+    replacer_->Unpin(frame_id);  // error
     replacer_->Pin(frame_id);
 
     // add to page_table_

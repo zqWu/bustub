@@ -39,6 +39,7 @@ auto ClockReplacer::Victim(frame_id_t *frame_id) -> bool {
   size_t cnt = 0;
   ListNode *target = nullptr;
   ListNode *pre = nullptr;
+  ListNode *min_pre = nullptr;
   ListNode *min_frame = nullptr;
   frame_id_t min_frame_id = INT_MAX;
 
@@ -50,6 +51,7 @@ auto ClockReplacer::Victim(frame_id_t *frame_id) -> bool {
 
     if (current_->pin_) {
       // just skip
+      pre = current_;
       current_ = current_->next_;
       cnt++;
       continue;
@@ -66,6 +68,7 @@ auto ClockReplacer::Victim(frame_id_t *frame_id) -> bool {
     if (current_->frame_id_ < min_frame_id) {
       min_frame_id = current_->frame_id_;
       min_frame = current_;
+      min_pre = pre;
     }
 
     pre = current_;
@@ -75,6 +78,7 @@ auto ClockReplacer::Victim(frame_id_t *frame_id) -> bool {
 
   if (target == nullptr && min_frame != nullptr) {
     target = min_frame;
+    pre = min_pre;
   }
 
   if (target != nullptr) {
