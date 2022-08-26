@@ -65,7 +65,6 @@ class ClockReplacer : public Replacer {
   ListNode *head_;
   ListNode *tail_;
   ListNode *current_;
-
 };
 
 }  // namespace bustub
