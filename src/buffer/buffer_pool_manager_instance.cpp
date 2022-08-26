@@ -13,6 +13,7 @@
 #include "buffer/buffer_pool_manager_instance.h"
 
 #include "buffer/clock_replacer.h"
+#include "common/logger.h"
 #include "common/macros.h"
 
 namespace bustub {
@@ -90,36 +91,57 @@ auto BufferPoolManagerInstance::NewPgImp(page_id_t *page_id) -> Page * {
   // 4.   Set the page ID output parameter. Return a pointer to P.
 
   *page_id = AllocatePage();
-  //  AllocatePage();
+  // LOG_DEBUG("page_id=%d", *page_id);
   frame_id_t frame_id;
   Page *page = nullptr;
 
   // 2
   if (!free_list_.empty()) {  // have empty frame
+    // LOG_DEBUG("have empty frame");
     frame_id = free_list_.front();
     free_list_.pop_front();
     page = pages_ + frame_id;
+  } else {
+    // LOG_DEBUG("frame full, need victim");
+    bool is_found = replacer_->Victim(&frame_id);
+    if (is_found) {
+      // write old page if dirty
+      Page *old_page = pages_ + frame_id;
+      int old_page_id = old_page->page_id_;
+      if (old_page->IsDirty()) {
+        // LOG_DEBUG("write dirty to disk, page_id=%d", old_page_id);
+        old_page->WLatch();
+        old_page->is_dirty_ = false;
+        disk_manager_->WritePage(old_page_id, reinterpret_cast<char *>(old_page));
+        old_page->WUnlatch();
+      }
+
+      // remove from page_table_
+      auto it = page_table_.find(old_page_id);
+      if (it != page_table_.end()) {
+        page_table_.erase(it);
+      } else {
+        // LOG_DEBUG("error: should found %d in page_table_, actually not found", old_page_id);
+      }
+
+      page = pages_ + frame_id;
+    }
+  }
+
+  if (page != nullptr) {
+    disk_manager_->ReadPage(*page_id, reinterpret_cast<char *>(page));
+
+    page->pin_count_ = 1;
+    page->is_dirty_ = false;
+    page->page_id_ = *page_id;
+    replacer_->Unpin(frame_id);  // 首先添加, 在pin
+    replacer_->Pin(frame_id);
 
     // page->page_id_ = INVALID_PAGE_ID;
     std::pair<page_id_t, frame_id_t> pair(*page_id, frame_id);
     page_table_.insert(page_table_.begin(), pair);
   } else {
-    // frame full, need victim
-    bool is_found = replacer_->Victim(&frame_id);
-    if (is_found) {  // found a page
-      page = pages_ + frame_id;
-      if (page->IsDirty()) {
-        // page->WLatch();
-        disk_manager_->WritePage(*page_id, reinterpret_cast<char *>(page));
-        // page->WUnlatch();
-      }
-    }
-  }
-
-  if (page != nullptr) {
-    // disk_manager_->ReadPage(*page_id, reinterpret_cast<char *>(page));
-    page->pin_count_ = 1;
-    replacer_->Pin(frame_id);
+    // LOG_DEBUG("error: no frame for new page, all pinned");
   }
 
   return page;
@@ -138,43 +160,53 @@ auto BufferPoolManagerInstance::FetchPgImp(page_id_t page_id) -> Page * {
 
   auto it = page_table_.find(page_id);
   if (it != page_table_.end()) {
-    // found in page_table
+    // LOG_DEBUG("page %d in page_table_", page_id);
     frame_id = it->second;
     replacer_->Pin(frame_id);
     return pages_ + frame_id;
   }
 
-  // not exists in page_table
+  Page *page = nullptr;  // if found proper page, fill this page for page_id
   if (!free_list_.empty()) {
-    // have empty frame
+    // LOG_DEBUG("page %d not in page_table_, has free_list_", page_id);
     frame_id = free_list_.front();
     free_list_.pop_front();
-    // read from disk, and unpin it
-    Page *page = pages_ + frame_id;
-    disk_manager_->ReadPage(page_id, reinterpret_cast<char *>(page));
-    // replacer_->Unpin(frame_id);
-    return pages_ + frame_id;
+    page = pages_ + frame_id;  // page from free_list_
+  } else {
+    bool is_found = replacer_->Victim(&frame_id);
+    if (is_found) {
+      // LOG_DEBUG("page %d not in page_table_, free_list_ empty, need victim, found frame_id=%d", page_id, frame_id);
+      page = pages_ + frame_id;
+    }
+    // else: no free_list_, no victim
   }
-
-  // frame full, need victim
-  bool is_found = replacer_->Victim(&frame_id);
-  if (is_found) {
-    // found a page
-    Page *page = pages_ + frame_id;
+  if (page != nullptr) {
     if (page->IsDirty()) {
       page->WLatch();
-      disk_manager_->WritePage(page_id, reinterpret_cast<char *>(page));
+      page->is_dirty_ = false;
+      disk_manager_->WritePage(page->page_id_, reinterpret_cast<char *>(page));
       page->WUnlatch();
     }
+
+    page->WLatch();
     // read from disk, and unpin it
     disk_manager_->ReadPage(page_id, reinterpret_cast<char *>(page));
-    // replacer_->Unpin(frame_id);
-    return pages_ + frame_id;
+    page->page_id_ = page_id;
+    page->is_dirty_ = false;
+    page->pin_count_ = 1;
+    page->WUnlatch();
+
+    replacer_->Unpin(frame_id);
+    replacer_->Pin(frame_id);
+
+    // add to page_table_
+    std::pair<page_id_t, frame_id_t> pair(page_id, frame_id);
+    page_table_.insert(page_table_.begin(), pair);
+  } else {
+    // LOG_DEBUG("page %d not in page_table_, free_list_ empty, need victim, not found => give up", page_id);
   }
 
-  // frame full, and no victim -> give up
-
-  return nullptr;
+  return page;
 }
 
 auto BufferPoolManagerInstance::DeletePgImp(page_id_t page_id) -> bool {
@@ -221,6 +253,7 @@ auto BufferPoolManagerInstance::UnpinPgImp(page_id_t page_id, bool is_dirty) -> 
   // found in page_table
   frame_id_t frame_id = it->second;
   Page *page = pages_ + frame_id;
+  page->is_dirty_ = is_dirty;
 
   if (page->pin_count_ > 0) {
     replacer_->Unpin(frame_id);

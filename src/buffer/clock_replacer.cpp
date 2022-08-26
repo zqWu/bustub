@@ -12,6 +12,7 @@
 
 #include "buffer/clock_replacer.h"
 #include <climits>
+#include "common/logger.h"
 
 namespace bustub {
 
@@ -31,6 +32,7 @@ ClockReplacer::~ClockReplacer() = default;
  */
 auto ClockReplacer::Victim(frame_id_t *frame_id) -> bool {
   if (head_ == nullptr) {
+    // LOG_DEBUG("Victim, head_ ==nullptr");
     return false;
   }
 
@@ -76,6 +78,8 @@ auto ClockReplacer::Victim(frame_id_t *frame_id) -> bool {
   }
 
   if (target != nullptr) {
+    // LOG_DEBUG("Victim, found, target frame_id=%d", target->frame_id_);
+
     // 处理指针
     if (clock_size_ == 1) {
       // last one
@@ -106,6 +110,7 @@ auto ClockReplacer::Victim(frame_id_t *frame_id) -> bool {
     clock_size_--;
     return true;
   }
+  // LOG_DEBUG("Victim, not found");
 
   return false;
 }
@@ -150,6 +155,7 @@ void ClockReplacer::Pin(frame_id_t frame_id) {
 void ClockReplacer::Unpin(frame_id_t frame_id) {
   // if empty then add
   if (clock_size_ == 0) {
+    // LOG_DEBUG("empty, add frame_id=%d", frame_id);
     head_ = static_cast<ListNode *>(Create_node(frame_id, false, nullptr));
     head_->next_ = head_;
     current_ = head_;
@@ -181,7 +187,7 @@ void ClockReplacer::Unpin(frame_id_t frame_id) {
 
   // found
   if (target != nullptr) {
-    printf("unpin found duplicate %d", frame_id);
+    // LOG_DEBUG("unpin found frame_id=%d", frame_id);
     if (target->pin_) {
       target->pin_ = false;
       pin_size_--;
@@ -191,11 +197,13 @@ void ClockReplacer::Unpin(frame_id_t frame_id) {
 
   // not found
   if (clock_size_ < capacity_) {
+    // LOG_DEBUG("unpin not found, add frame_id=%d", frame_id);
     // case: not full
     ListNode *new_node = static_cast<ListNode *>(Create_node(frame_id, false, head_));
     pre->next_ = new_node;
     tail_ = new_node;
   } else {
+    // LOG_DEBUG("unpin not found, full, frame_id=%d", frame_id);
     // full, we should evacuate one element
     throw "TODO not implement";
   }
